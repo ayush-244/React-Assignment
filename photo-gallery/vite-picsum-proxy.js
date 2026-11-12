@@ -1,43 +1,54 @@
-import fs from 'node:fs'
-import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+/**
+ * Dev/preview middleware that forwards `/api/picsum` to the live Picsum API.
+ * Production static hosting uses `api/picsum.js` (Vercel) instead — never this file.
+ * Never serves fixture/sample photo data.
+ */
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const FIXTURE_DIR = path.join(__dirname, 'public', 'fixtures', 'picsum')
-
-function readFixture(page) {
-  const filePath = path.join(FIXTURE_DIR, `page-${page}.json`)
-  if (!fs.existsSync(filePath)) {
-    return '[]'
-  }
-  return fs.readFileSync(filePath, 'utf8')
-}
+const UPSTREAM = 'https://picsum.photos/v2/list'
+/** Bounded upstream wait; client also caps proxy hop (~1s remaining of 5s budget). */
+const TIMEOUT_MS = 3500
 
 async function fetchUpstream(page, limit) {
-  const url = `https://picsum.photos/v2/list?page=${page}&limit=${limit}`
   const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), 4000)
+  const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS)
 
   try {
-    const response = await fetch(url, { signal: controller.signal })
+    const response = await fetch(`${UPSTREAM}?page=${page}&limit=${limit}`, {
+      signal: controller.signal,
+      headers: { Accept: 'application/json' },
+    })
     clearTimeout(timeout)
-
-    if (!response.ok) {
-      throw new Error(`Upstream HTTP ${response.status}`)
-    }
 
     const text = await response.text()
+
+    if (!response.ok) {
+      return {
+        ok: false,
+        status: response.status,
+        error: `Picsum API returned HTTP ${response.status}`,
+        body: text.slice(0, 200),
+      }
+    }
+
     JSON.parse(text)
-    return { ok: true, body: text, fromCache: false }
+    return { ok: true, body: text }
   } catch (error) {
     clearTimeout(timeout)
-    return { ok: false, error }
+    return {
+      ok: false,
+      status: 502,
+      error:
+        error.name === 'AbortError'
+          ? 'Timed out while contacting the Picsum API'
+          : error.message || 'Failed to reach the Picsum API',
+    }
   }
 }
 
 function createPicsumProxyMiddleware() {
   return async function picsumProxy(req, res, next) {
-    if (!req.url?.startsWith('/api/picsum/v2/list')) {
+    const pathOnly = req.url?.split('?')[0]
+    if (pathOnly !== '/api/picsum') {
       next()
       return
     }
@@ -53,21 +64,20 @@ function createPicsumProxyMiddleware() {
 
     if (upstream.ok) {
       res.setHeader('X-Picsum-Source', 'live')
+      res.statusCode = 200
       res.end(upstream.body)
       return
     }
 
-    const fixture = readFixture(page)
-    res.setHeader('X-Picsum-Source', 'fixture-fallback')
-    res.setHeader('X-Picsum-Fallback-Reason', String(upstream.error?.message || upstream.error))
-    res.statusCode = 200
-    res.end(fixture)
+    res.setHeader('X-Picsum-Source', 'error')
+    res.statusCode = upstream.status || 502
+    res.end(JSON.stringify({ error: upstream.error || 'Picsum API unavailable' }))
   }
 }
 
 export function picsumProxyPlugin() {
   return {
-    name: 'picsum-proxy-fallback',
+    name: 'picsum-live-proxy',
     configureServer(server) {
       server.middlewares.use(createPicsumProxyMiddleware())
     },
