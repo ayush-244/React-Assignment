@@ -1,33 +1,83 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useLocalStorage } from './useLocalStorage'
 import { fetchPicsumPage } from '../utils/api'
+import { fetchDemoPage } from '../utils/demoApi'
 
-const LIKES_KEY = 'exactspace-gallery-likes'
+const LIVE_LIKES_KEY = 'exactspace-gallery-likes'
+const DEMO_LIKES_KEY = 'exactspace-gallery-demo-likes'
+
+/**
+ * Shared initial live fetch so React Strict Mode remounts reuse one in-flight
+ * request instead of aborting and starting a duplicate.
+ */
+let sharedInitialLivePromise = null
+let sharedInitialLiveController = null
+
+function startSharedInitialLiveFetch() {
+  if (sharedInitialLivePromise) return sharedInitialLivePromise
+
+  sharedInitialLiveController = new AbortController()
+  const promise = fetchPicsumPage(1, 10, sharedInitialLiveController.signal).finally(() => {
+    // Keep the settled promise briefly so Strict Mode remount can still await it.
+    queueMicrotask(() => {
+      if (sharedInitialLivePromise === promise) {
+        sharedInitialLivePromise = null
+        sharedInitialLiveController = null
+      }
+    })
+  })
+  sharedInitialLivePromise = promise
+  return promise
+}
+
+function cancelSharedInitialLiveFetch() {
+  sharedInitialLiveController?.abort()
+  sharedInitialLivePromise = null
+  sharedInitialLiveController = null
+}
 
 export function usePhotos() {
+  const [mode, setMode] = useState('live') // 'live' | 'demo'
   const [photos, setPhotos] = useState([])
   const [page, setPage] = useState(0)
-  const [status, setStatus] = useState('idle')
+  // Start in loading so the skeleton appears on first paint (before effects).
+  const [status, setStatus] = useState('loading')
   const [error, setError] = useState(null)
   const [hasMore, setHasMore] = useState(true)
-  const [usingFallback, setUsingFallback] = useState(false)
-  const [likes, setLikes] = useLocalStorage(LIKES_KEY, {})
+  const [liveLikes, setLiveLikes] = useLocalStorage(LIVE_LIKES_KEY, {})
+  const [demoLikes, setDemoLikes] = useLocalStorage(DEMO_LIKES_KEY, {})
 
+  const modeRef = useRef(mode)
   const seenIdsRef = useRef(new Set())
   const abortRef = useRef(null)
   const requestIdRef = useRef(0)
   const hasMoreRef = useRef(true)
   const pageRef = useRef(0)
-  const statusRef = useRef('idle')
+  const statusRef = useRef('loading')
 
   useEffect(() => {
     statusRef.current = status
   }, [status])
 
-  const applyPageData = useCallback((pageToLoad, data, { replace, source }) => {
+  useEffect(() => {
+    modeRef.current = mode
+  }, [mode])
+
+  const resetFeedState = useCallback(() => {
+    seenIdsRef.current = new Set()
+    pageRef.current = 0
+    hasMoreRef.current = true
+    setPhotos([])
+    setPage(0)
+    setHasMore(true)
+    setError(null)
+  }, [])
+
+  const applyPageData = useCallback((pageToLoad, data, { replace }) => {
     if (!Array.isArray(data) || data.length === 0) {
       setHasMore(false)
       hasMoreRef.current = false
+      statusRef.current = 'success'
       setStatus('success')
       return
     }
@@ -48,11 +98,11 @@ export function usePhotos() {
     pageRef.current = pageToLoad
     setHasMore(true)
     hasMoreRef.current = true
-    setUsingFallback(source === 'fixture-fallback')
+    statusRef.current = 'success'
     setStatus('success')
   }, [])
 
-  const fetchPage = useCallback(async (pageToLoad, { replace = false } = {}) => {
+  const fetchPageForMode = useCallback(async (activeMode, pageToLoad, { replace = false } = {}) => {
     if (!replace && (statusRef.current === 'loading' || statusRef.current === 'loadingMore')) {
       return
     }
@@ -63,87 +113,121 @@ export function usePhotos() {
     abortRef.current = controller
     const requestId = ++requestIdRef.current
 
-    setStatus(replace || pageRef.current === 0 ? 'loading' : 'loadingMore')
+    const nextStatus = replace || pageRef.current === 0 ? 'loading' : 'loadingMore'
+    statusRef.current = nextStatus
+    setStatus(nextStatus)
     setError(null)
 
     try {
-      const { data, source } = await fetchPicsumPage(pageToLoad, 10, controller.signal)
-      if (requestId !== requestIdRef.current) return
-      applyPageData(pageToLoad, data, { replace, source })
+      const result =
+        activeMode === 'demo'
+          ? await fetchDemoPage(pageToLoad, controller.signal)
+          : await fetchPicsumPage(pageToLoad, 10, controller.signal)
+
+      if (requestId !== requestIdRef.current || modeRef.current !== activeMode) return
+      applyPageData(pageToLoad, result.data, { replace })
     } catch (err) {
       if (err.name === 'AbortError') return
-      if (requestId !== requestIdRef.current) return
+      if (requestId !== requestIdRef.current || modeRef.current !== activeMode) return
       setError(err.message || 'Something went wrong while loading photos')
+      statusRef.current = 'error'
       setStatus('error')
     }
   }, [applyPageData])
 
+  // Initial live load only (Strict Mode–safe shared in-flight request).
   useEffect(() => {
-    const controller = new AbortController()
-    abortRef.current = controller
     const requestId = ++requestIdRef.current
 
-    const loadInitial = async () => {
-      setStatus('loading')
-      setError(null)
-
+    const loadInitialLive = async () => {
       try {
-        const { data, source } = await fetchPicsumPage(1, 10, controller.signal)
-        if (requestId !== requestIdRef.current) return
-        applyPageData(1, data, { replace: true, source })
+        const { data } = await startSharedInitialLiveFetch()
+        if (requestId !== requestIdRef.current || modeRef.current !== 'live') return
+        applyPageData(1, data, { replace: true })
       } catch (err) {
         if (err.name === 'AbortError') return
-        if (requestId !== requestIdRef.current) return
+        if (requestId !== requestIdRef.current || modeRef.current !== 'live') return
         setError(err.message || 'Something went wrong while loading photos')
+        statusRef.current = 'error'
         setStatus('error')
       }
     }
 
-    void loadInitial()
+    void loadInitialLive()
 
     return () => {
-      controller.abort()
+      // Invalidate this subscriber only. Do not abort the shared request here —
+      // Strict Mode cleanup would otherwise force a duplicate second fetch.
+      if (requestId === requestIdRef.current) {
+        requestIdRef.current += 1
+      }
     }
   }, [applyPageData])
 
   const loadMore = useCallback(() => {
     if (statusRef.current === 'loading' || statusRef.current === 'loadingMore') return
     if (!hasMoreRef.current) return
-    void fetchPage(pageRef.current + 1)
-  }, [fetchPage])
+    void fetchPageForMode(modeRef.current, pageRef.current + 1)
+  }, [fetchPageForMode])
 
-  const retry = useCallback(() => {
-    if (pageRef.current === 0 || photos.length === 0) {
-      setHasMore(true)
-      hasMoreRef.current = true
-      void fetchPage(1, { replace: true })
-      return
-    }
-    void fetchPage(pageRef.current + 1)
-  }, [fetchPage, photos.length])
+  const retryLive = useCallback(() => {
+    cancelSharedInitialLiveFetch()
+    setMode('live')
+    modeRef.current = 'live'
+    resetFeedState()
+    void fetchPageForMode('live', 1, { replace: true })
+  }, [fetchPageForMode, resetFeedState])
+
+  const enterDemoMode = useCallback(() => {
+    // Cancel any in-flight live request so it cannot overwrite demo state.
+    cancelSharedInitialLiveFetch()
+    abortRef.current?.abort()
+    requestIdRef.current += 1
+    setMode('demo')
+    modeRef.current = 'demo'
+    resetFeedState()
+    void fetchPageForMode('demo', 1, { replace: true })
+  }, [fetchPageForMode, resetFeedState])
+
+  const returnToLive = useCallback(() => {
+    cancelSharedInitialLiveFetch()
+    abortRef.current?.abort()
+    requestIdRef.current += 1
+    setMode('live')
+    modeRef.current = 'live'
+    resetFeedState()
+    void fetchPageForMode('live', 1, { replace: true })
+  }, [fetchPageForMode, resetFeedState])
 
   const likePhoto = useCallback((id) => {
     const key = String(id)
-    setLikes((prev) => ({
+    const setter = modeRef.current === 'demo' ? setDemoLikes : setLiveLikes
+    setter((prev) => ({
       ...prev,
       [key]: (prev[key] ?? 0) + 1,
     }))
-  }, [setLikes])
+  }, [setDemoLikes, setLiveLikes])
 
   const getLikes = useCallback(
-    (id) => likes[String(id)] ?? 0,
-    [likes],
+    (id) => {
+      const store = mode === 'demo' ? demoLikes : liveLikes
+      return store[String(id)] ?? 0
+    },
+    [demoLikes, liveLikes, mode],
   )
 
   return {
+    mode,
+    isDemo: mode === 'demo',
     photos,
     page,
     status,
     error,
     hasMore,
-    usingFallback,
     loadMore,
-    retry,
+    retryLive,
+    enterDemoMode,
+    returnToLive,
     likePhoto,
     getLikes,
   }

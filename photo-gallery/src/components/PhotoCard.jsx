@@ -4,7 +4,13 @@ import { faThumbsUp } from '@fortawesome/free-solid-svg-icons'
 import { motion } from 'motion/react'
 import { ImageOff } from 'lucide-react'
 
-export default function PhotoCard({ photo, likes, onLike, onOpen }) {
+export default function PhotoCard({
+  photo,
+  likes,
+  onLike,
+  onOpen,
+  priority = false,
+}) {
   const [loaded, setLoaded] = useState(false)
   const [failed, setFailed] = useState(false)
 
@@ -33,8 +39,9 @@ export default function PhotoCard({ photo, likes, onLike, onOpen }) {
                 alt={altText}
                 width={photo.width}
                 height={photo.height}
-                loading="lazy"
+                loading={priority ? 'eager' : 'lazy'}
                 decoding="async"
+                fetchPriority={priority ? 'high' : 'auto'}
                 onLoad={() => setLoaded(true)}
                 onError={() => setFailed(true)}
                 className={`h-full w-full object-cover transition duration-500 group-hover:scale-[1.02] ${

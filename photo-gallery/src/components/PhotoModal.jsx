@@ -1,11 +1,13 @@
-import { useEffect, useId, useRef } from 'react'
-import { X } from 'lucide-react'
+import { useEffect, useId, useRef, useState } from 'react'
+import { ImageOff, X } from 'lucide-react'
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome'
 import { faThumbsUp } from '@fortawesome/free-solid-svg-icons'
 
 export default function PhotoModal({ photo, likes, onLike, onClose }) {
   const titleId = useId()
   const closeRef = useRef(null)
+  const [failedPhotoId, setFailedPhotoId] = useState(null)
+  const imageFailed = Boolean(photo) && failedPhotoId === photo.id
 
   useEffect(() => {
     if (!photo) return undefined
@@ -63,11 +65,24 @@ export default function PhotoModal({ photo, likes, onLike, onClose }) {
         </div>
 
         <div className="overflow-y-auto">
-          <img
-            src={photo.download_url}
-            alt={`Photograph by ${photo.author}`}
-            className="max-h-[60dvh] w-full object-contain bg-black"
-          />
+          {!imageFailed ? (
+            <img
+              src={photo.download_url}
+              alt={`Photograph by ${photo.author}`}
+              width={photo.width}
+              height={photo.height}
+              loading="eager"
+              decoding="async"
+              fetchPriority="high"
+              onError={() => setFailedPhotoId(photo.id)}
+              className="max-h-[60dvh] w-full object-contain bg-black"
+            />
+          ) : (
+            <div className="flex max-h-[60dvh] min-h-48 w-full flex-col items-center justify-center gap-2 bg-black text-white/70">
+              <ImageOff size={32} aria-hidden="true" />
+              <span className="text-sm">Image unavailable</span>
+            </div>
+          )}
           <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-4 sm:px-5">
             <a
               href={photo.url}
