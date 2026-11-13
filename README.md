@@ -116,19 +116,20 @@ react-assignments/
 ├── photo-gallery/
 │   ├── photo-gallery.jpg                # original reference
 │   ├── reactjs_photo_gallery_assignment.md
-│   ├── public/fixtures/picsum/          # offline fallback pages if Picsum is down
-│   ├── vite-picsum-proxy.js             # Vite middleware: live API first, fixture fallback
+│   ├── api/picsum.js                    # Vercel serverless live Picsum proxy
+│   ├── vite-picsum-proxy.js             # Dev/preview live-only Picsum proxy
 │   ├── src/
 │   │   ├── components/
-│   │   ├── hooks/
-│   │   ├── utils/
+│   │   ├── hooks/                       # includes usePhotos.test.js (mocked)
+│   │   ├── utils/                       # includes api.test.js (mocked)
+│   │   ├── test/                        # Picsum-shaped fixtures for tests only
 │   │   ├── App.jsx
 │   │   ├── main.jsx
 │   │   └── index.css
 │   ├── index.html
 │   ├── package.json
 │   └── vite.config.js
-├── screenshots/                         # captured UI shots from running apps
+├── screenshots/                         # chat working + gallery API-unavailable
 ├── README.md
 └── .gitignore
 ```
@@ -217,7 +218,46 @@ When the user approaches the bottom sentinel, the next page is requested and app
 
 ## Testing instructions
 
-### Chat checklist
+### Automated gallery tests (mocked Picsum schema)
+
+From `photo-gallery/`:
+
+```bash
+npm test
+```
+
+These Vitest tests mock HTTP responses that follow the **real Picsum `/v2/list` schema** (`id`, `author`, `download_url`, etc.). They verify:
+
+- page 1 / page 2 / page 3 fetching
+- append-only pagination
+- duplicate ID filtering
+- stop condition when the API returns `[]`
+- independent unlimited likes
+- no overlapping `loadMore` requests
+
+**Important:** Vitest mocks are restricted to automated tests under `photo-gallery/src/**/*.test.js` and `photo-gallery/src/test/`.
+
+### Live Picsum vs Demo Mode vs test mocks
+
+| Mode | When it runs | Data source |
+| --- | --- | --- |
+| **Live Gallery** (default) | Always tried first | Official `https://picsum.photos/v2/list` only |
+| **Demo Mode** | Only after user clicks **View Demo Gallery** | Local JSON under `photo-gallery/public/demo/picsum/` (Picsum-shaped). Image files are served from Unsplash CDN URLs, so **Demo Mode still needs internet for photographs**, but it does **not** call Picsum. |
+| **Vitest mocks** | `npm test` only | In-memory Picsum-shaped fixtures — never shown as the live gallery |
+
+On live failure the UI shows **Retry Live API** and optional **View Demo Gallery**. Demo Mode shows a persistent banner:
+
+> DEMO MODE — Sample photos. Live Picsum API is unavailable.
+
+**Return to Live Gallery** exits demo mode and retries the official API. Live likes and demo likes are stored separately.
+
+| Kind | What it proves | Current status in this environment |
+| --- | --- | --- |
+| Live Picsum requests | Real network responses from `https://picsum.photos/v2/list` | **Blocked** — upstream timeouts (no HTTP body) |
+| Demo Mode gallery | Explicit sample feed with visible photos | Available via **View Demo Gallery** |
+| Mocked integration tests | App logic against Picsum-shaped JSON | **Passing** (`npm test`) |
+
+### Chat checklist (manual)
 
 1. Send a valid message — it appears immediately with a random username.
 2. Try sending empty / whitespace-only text — it is blocked.
@@ -226,14 +266,14 @@ When the user approaches the bottom sentinel, the next page is requested and app
 5. Type `@` and navigate users with arrow keys / Enter.
 6. Toggle theme and refresh — theme + messages persist.
 
-### Gallery checklist
+### Gallery checklist (manual / live)
 
-1. Page 1 loads from Picsum with authors and images.
+1. Page 1 loads from Picsum with authors and images (**requires live API**).
 2. Layout remains one column on mobile and desktop.
-3. Scroll to bottom — page 2+ appends without replacing prior photos.
+3. Scroll to bottom — page 2+ appends without replacing prior photos (**requires live API**).
 4. Click Font Awesome thumbs-up repeatedly — likes increment independently.
-5. Trigger/retry error states if needed (network throttle).
-6. Open a photo detail modal and close with Escape / backdrop click.
+5. If Picsum is down — error state + Retry (no sample photos).
+6. Open a photo detail modal and close with Escape / backdrop click (**requires loaded photos**).
 
 ---
 
@@ -241,14 +281,17 @@ When the user approaches the bottom sentinel, the next page is requested and app
 
 Captured from the running local apps:
 
-| App | Screenshot |
-| --- | --- |
-| Chat (light) | `screenshots/chat-light.png` |
-| Gallery (light) | `screenshots/gallery-light.png` |
+| App | Screenshot | Notes |
+| --- | --- | --- |
+| Chat (light) | `screenshots/chat-light.png` | Working chat UI |
+| Gallery API unavailable | `screenshots/gallery-api-unavailable.png` | Live error state while Picsum times out |
+| Gallery Demo Mode | `screenshots/gallery-demo-mode.png` | **Demo sample photos** (not live Picsum) |
 
 ![Chat app](screenshots/chat-light.png)
 
-![Photo gallery](screenshots/gallery-light.png)
+![Photo gallery — API unavailable state](screenshots/gallery-api-unavailable.png)
+
+![Photo gallery — Demo Mode](screenshots/gallery-demo-mode.png)
 
 ---
 
@@ -281,7 +324,9 @@ Same approach: set base directory to `chat-app` or `photo-gallery`, build comman
 
 - Chat messages are local-only (no Socket.IO backend). Socket.IO stretch goal was intentionally not implemented.
 - Gallery likes persist in LocalStorage per browser only.
-- Picsum availability / rate limits depend on the public API. During development, `picsum.photos` returned Cloudflare **HTTP 522** from this network. The gallery still prefers the live Picsum API first; if it is unreachable, a same-shape local fixture feed is used so infinite scroll / likes remain testable. A banner indicates when fallback mode is active.
+- Gallery photos come **only** from the live Picsum API (`https://picsum.photos/v2/list`). There is no silent sample-data fallback. If Picsum is unreachable, the UI shows an error with Retry.
+- **Upstream outage (observed during submission prep):** requests to `https://picsum.photos/v2/list` timed out from this network (and from external fetch checks), so **live image rendering and live infinite-scroll verification could not be completed**. Mocked tests still validate pagination/likes against Picsum-shaped responses.
+- Fetch order: direct HTTPS to Picsum first (with limited exponential-backoff retries), then optional same-origin `/api/picsum` proxy. Production does not depend on Vite’s dev middleware; Vercel can serve `api/picsum.js` when a server-side hop is needed.
 - Very large local chat histories can grow LocalStorage usage over time.
 
 ---
